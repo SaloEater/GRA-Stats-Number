@@ -1,0 +1,187 @@
+-- Sensor value labels for actor_state_info inventory bars.
+-- Targets actor_state_info_16.xml / actor_state_info.xml (this UI rework extracts
+-- the sensor section from ui_inventory_16.xml into those dedicated files).
+-- DXML patches each sensor element to add a <text> child, then hooks
+-- ui_inventory.UIInventory.UpdateStats to write percentage values into them.
+
+local sv_ui_file        = nil
+local sv_hook_installed = false
+
+-- { key, xml_tag, x16, w16, x_std, w_std }
+-- x_*/w_* match the state_progress bar geometry in each file variant.
+local SENSORS = {
+    { "health",     "health_sensor",     21, 211, 28, 282 },
+    { "radia",      "radia_sensor",      21,  91, 28, 122 },
+    { "acid",       "acid_sensor",       21,  91, 28, 122 },
+    { "shock",      "shock_sensor",      21,  91, 28, 122 },
+    { "fire",       "fire_sensor",       21,  91, 28, 122 },
+    { "psi",        "psi_sensor",        21,  91, 28, 122 },
+    { "wound",      "wound_sensor",      21,  91, 28, 122 },
+    { "fire_wound", "fire_wound_sensor", 21,  91, 28, 122 },
+    { "power",      "power_sensor",      21,  91, 28, 122 },
+    -- HTS sensors (UI rework mod); silently skipped if not in self.stat
+    { "hunger",     "hunger_sensor",     21,  46, 28,  62 },
+    { "thirst",     "thirst_sensor",     21,  46, 28,  62 },
+    { "sleep",      "sleep_sensor",      21,  46, 28,  62 },
+}
+
+-- ──────────────────────────────────────────────────────────────────────────────
+-- Value update
+
+local function update_sensor_labels(self)
+    if not self.sv_labels then return end
+    local actor = db.actor
+    if not actor then return end
+    local sl = self.stat_list
+
+    if self.sv_labels["health"] then
+        self.sv_labels["health"]:SetText(math.floor(actor.health * 100) .. "%")
+    end
+
+    local prot = { "radia", "acid", "shock", "fire", "psi" }
+    for _, name in ipairs(prot) do
+        if self.sv_labels[name] then
+            local v = (self.stat_outfit[name] or 0)
+                    + (self.stat_helm[name]   or 0)
+                    + (self.stat_arty[name]   or 0)
+                    + (self.stat_boost[name]  or 0)
+            local mx  = sl[name] and sl[name].max or 1
+            local pct = (mx > 0) and math.floor(clamp(v, 0, mx) / mx * 100) or 0
+            self.sv_labels[name]:SetText(pct .. "%")
+        end
+    end
+
+    -- wound / fire_wound: zz_ui_inventory_better_stats_bars adjusts the bar
+    -- denominator by the active booster immunity (WoundImmunity / FireWoundImmunity).
+    -- Booster values land in self.booster_immunities (not stat_boost), and the
+    -- effective max = stat_list.max * ((base_immunity - booster_imm) / base_immunity).
+    -- We replicate that formula when the UI rework extensions are present; otherwise
+    -- fall back to the vanilla sum (no booster contribution).
+    for _, name in ipairs({ "wound", "fire_wound" }) do
+        if self.sv_labels[name] then
+            local v  = (self.stat_outfit[name] or 0)
+                     + (self.stat_helm[name]   or 0)
+                     + (self.stat_arty[name]   or 0)
+            local mx = sl[name] and sl[name].max or 1
+            if self.booster_immunities and self.GetActorImmunity then
+                local imm    = self:GetActorImmunity(name) or 1
+                local b_imm  = self.booster_immunities[name] or 0
+                local ratio  = (imm > 0) and ((imm - b_imm) / imm) or 1
+                mx = mx * (ratio > 0 and ratio or 1)
+            end
+            local pct = (mx > 0) and math.floor(clamp(v, 0, mx) / mx * 100) or 0
+            self.sv_labels[name]:SetText(pct .. "%")
+        end
+    end
+
+    -- Power: V_SatietyPower is a local inside orig UpdateStats; approximate from
+    -- the persistent component tables that UpdateStats leaves on self.
+    if self.sv_labels["power"] then
+        local pw = (self.stat_outfit["power"] or 0)
+                 + (self.stat_arty["power"]   or 0)
+                 + (self.stat_boost["power"]  or 0)
+        local mx  = sl["power"] and sl["power"].max or 1
+        local pct = (mx > 0) and math.floor(clamp(pw, 0, mx) / mx * 100) or 0
+        self.sv_labels["power"]:SetText(pct .. "%")
+    end
+
+    -- HTS sensors: if the HTS mod populates self.stat for these, show their bar value.
+    -- We have no generic formula so we rely on their progress bar position via self.stat.
+    for _, name in ipairs({ "hunger", "thirst", "sleep" }) do
+        if self.sv_labels[name] and self.stat and self.stat[name] and self.stat[name].bar then
+            local pos = self.stat[name].bar:GetProgressPos()
+            self.sv_labels[name]:SetText(math.floor((pos or 0) * 100) .. "%")
+        end
+    end
+end
+
+-- ──────────────────────────────────────────────────────────────────────────────
+-- Label initialisation (lazy — first UpdateStats call after inventory opens)
+
+local function init_sensor_labels(self)
+    local xml = CScriptXmlInit()
+    -- sv_ui_file is set in on_xml_read to the un-prefixed filename.
+    -- ParseFile triggers DXML again; on_xml_read matches both the "ui\"-prefixed
+    -- (engine) and un-prefixed (Lua) forms so patches apply on this re-parse too.
+    xml:ParseFile(sv_ui_file)
+
+    self.sv_labels = {}
+    for _, s in ipairs(SENSORS) do
+        local name = s[1]
+        local tag  = s[2]
+        if self.stat and self.stat[name] and self.stat[name].base then
+            local path = "equipment:actor_state_info:" .. tag .. ":text"
+            -- pcall guards Lua-level errors; engine-level VERIFY failures are fatal
+            -- regardless. Correct DXML patching is the real protection.
+            local ok, widget = pcall(xml.InitTextWnd, xml, path, self.stat[name].base)
+            if ok and widget then
+                self.sv_labels[name] = widget
+            end
+        end
+    end
+end
+
+-- ──────────────────────────────────────────────────────────────────────────────
+-- ui_inventory.UIInventory.UpdateStats hook
+
+local function install_hook()
+    if sv_hook_installed or not ui_inventory or not ui_inventory.UIInventory then return end
+    sv_hook_installed = true
+
+    local orig = ui_inventory.UIInventory.UpdateStats
+    ui_inventory.UIInventory.UpdateStats = function(self)
+        if not self.sv_labels then
+            init_sensor_labels(self)
+        end
+        orig(self)
+        if self.sv_labels then
+            update_sensor_labels(self)
+        end
+    end
+end
+
+-- ──────────────────────────────────────────────────────────────────────────────
+-- DXML: patch actor_state_info XML before the engine consumes it
+
+local function patch_xml(xml_obj, is_16)
+    for _, s in ipairs(SENSORS) do
+        local tag = s[2]
+        local x   = is_16 and s[3] or s[5]
+        local w   = is_16 and s[4] or s[6]
+
+        -- Direct-child selectors avoid false positives in complex XML.
+        local sel = "equipment > actor_state_info > " .. tag
+        if is_not_empty(xml_obj:query(sel .. " > text[a=200]")) then
+            -- already patched (idempotent: re-parse from init_sensor_labels)
+        else
+            local res = xml_obj:query(sel)
+            if is_not_empty(res) then
+                local el      = res[1]
+                local xml_str = string.format(
+                    [[<text x="%d" y="6" width="%d" height="18" align="c" vert_align="c" font="letterica16" r="255" g="255" b="255" a="200"></text>]],
+                    x, w
+                )
+                xml_obj:insertFromXMLString(xml_str, el, #el.kids)
+            end
+        end
+    end
+end
+
+-- ──────────────────────────────────────────────────────────────────────────────
+-- DXML entry point (auto-called by dxml_core.script)
+
+function on_xml_read()
+    RegisterScriptCallback("on_xml_read", function(xml_file_name, xml_obj)
+        -- Match both the "ui\"-prefixed form (engine-triggered) and the bare form
+        -- (Lua ParseFile from init_sensor_labels) to ensure patches apply on re-parse.
+        if xml_file_name == [[ui\actor_state_info_16.xml]] or xml_file_name == "actor_state_info_16.xml" then
+            sv_ui_file = "actor_state_info_16.xml"
+            patch_xml(xml_obj, true)
+            install_hook()
+        elseif xml_file_name == [[ui\actor_state_info.xml]] or xml_file_name == "actor_state_info.xml" then
+            sv_ui_file = "actor_state_info.xml"
+            patch_xml(xml_obj, false)
+            install_hook()
+        end
+    end)
+end
