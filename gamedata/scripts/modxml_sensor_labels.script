@@ -3,9 +3,12 @@
 -- the sensor section from ui_inventory_16.xml into those dedicated files).
 -- DXML patches each sensor element to add a <text> child, then hooks
 -- ui_inventory.UIInventory.UpdateStats to write percentage values into them.
+-- Comparison: hovering an outfit, helmet, or booster shows "XX% -> YY%" colored
+-- green (better) or red (worse), matching the bar comparison visual.
 
-local sv_ui_file        = nil
-local sv_hook_installed = false
+local sv_ui_file             = nil
+local sv_hook_installed      = false
+local sv_info_hook_installed = false
 
 -- { key, xml_tag, x16, w16, x_std, w_std }
 -- x_*/w_* match the state_progress bar geometry in each file variant.
@@ -46,19 +49,26 @@ local ARTY_KEY = {
     psi   = "telepatic_immunity",
 }
 
--- BoosterID value → sensor name for additive protection boosters
+-- sensor key → boost ID string for actor_status.get_boost
 local BOOST_SENSOR = {
-    radia = "RadiationProtection",
-    psi   = "TelepaticProtection",
-    acid  = "ChemicalBurnProtection",
-    wound = "WoundImmunity",
+    radia      = "RadiationProtection",
+    psi        = "TelepaticProtection",
+    acid       = "ChemicalBurnProtection",
+    wound      = "WoundImmunity",
     fire_wound = "FireWoundImmunity",
 }
 
+-- sensor key → stats_table["booster"] key (protection-type boosters; radia/psi/acid only)
 local BOOSTER_STAT_KEY = {
     radia = "boost_radiation_protection",
     psi   = "boost_telepat_protection",
-    acid  = "boost_chemburn_protection"
+    acid  = "boost_chemburn_protection",
+}
+
+-- LTX param name on consumable items for wound-type immunity boosters
+local BOOST_WOUND_LTX = {
+    wound      = "boost_wound_immunity",
+    fire_wound = "boost_fire_wound_immunity",
 }
 
 -- ──────────────────────────────────────────────────────────────────────────────
@@ -79,7 +89,8 @@ local function update_sensor_labels(self)
     local st_a = utils_ui.stats_table["artefact"]
     local st_b = utils_ui.stats_table["booster"]
 
-    -- Accumulate raw protection values from all sources
+    -- Accumulate raw protection values from outfit+artefact sources.
+    -- Boosters are handled per-sensor below via actor_status.get_boost.
     local v = {}
 
     -- Outfit (slot 7) and Helmet (slot 12)
@@ -90,8 +101,7 @@ local function update_sensor_labels(self)
             for sn, sk in pairs(STAT_KEY) do
                 local gr = st_o[sk]
                 if gr then
-                    if not v[sn] then v[sn] = 0 end
-                    v[sn] = v[sn] + (utils_ui.get_stats_value(item, sec, gr, sk) or 0)
+                    v[sn] = (v[sn] or 0) + (utils_ui.get_stats_value(item, sec, gr, sk) or 0)
                 end
             end
         end
@@ -103,7 +113,7 @@ local function update_sensor_labels(self)
         for sn, ak in pairs(ARTY_KEY) do
             local gr = st_a[ak]
             if gr then
-                v[sn] = v[sn] + (utils_ui.get_stats_value(obj, sec, gr, ak) or 0)
+                v[sn] = (v[sn] or 0) + (utils_ui.get_stats_value(obj, sec, gr, ak) or 0)
             end
         end
     end)
@@ -112,26 +122,95 @@ local function update_sensor_labels(self)
     actor:cast_Actor():conditions():BoosterForEach(function(bt, _, bval)
         local sn = BOOST_SENSOR[bt]
         if sn then
-            v[sn] = v[sn] + bval
+            v[sn] = (v[sn] or 0) + bval
         end
     end)
 
-    -- Display: standard protection sensors (radia/acid/shock/fire/psi)
+    -- ── Comparison context ────────────────────────────────────────────────────
+    local cmp_type = nil   -- "outfit" | "booster" | nil
+    local v_comp   = nil   -- adjusted v[] for outfit/helmet swap
+    local cmp_obj  = nil   -- hovered item object (for booster comparison)
+    local cmp_sec  = nil
+
+    local ii = self.item_info
+    if ii and ii.sv_hover_obj and ii.sv_hover_type then
+        cmp_type = ii.sv_hover_type
+        cmp_obj  = ii.sv_hover_obj
+        cmp_sec  = cmp_obj:section()
+
+        if cmp_type == "outfit" then
+            -- Clone v[], subtract current equipped item in the slot, add hovered item.
+            v_comp = {}
+            for sn in pairs(STAT_KEY) do
+                v_comp[sn] = v[sn] or 0
+            end
+            local cur = actor:item_in_slot(ii.sv_hover_slot)
+            if cur then
+                local csec = cur:section()
+                for sn, sk in pairs(STAT_KEY) do
+                    local gr = st_o[sk]
+                    if gr then
+                        v_comp[sn] = v_comp[sn] - (utils_ui.get_stats_value(cur, csec, gr, sk) or 0)
+                    end
+                end
+            end
+            for sn, sk in pairs(STAT_KEY) do
+                local gr = st_o[sk]
+                if gr then
+                    v_comp[sn] = v_comp[sn] + (utils_ui.get_stats_value(cmp_obj, cmp_sec, gr, sk) or 0)
+                end
+            end
+        end
+        -- booster comparison is computed inline per-sensor below
+    end
+
+    -- ── Protection sensors ────────────────────────────────────────────────────
     for _, name in ipairs({ "radia", "acid", "shock", "fire", "psi", "wound", "fire_wound" }) do
         if self.sv_labels[name] then
             local gr  = st_o[STAT_KEY[name]]
             local mag = gr and gr.magnitude
-            local pct
-            if name == "wound" or name == "fire_wound" then
-                local booster = actor_status.get_boost(BOOST_SENSOR[name]) or 0
-                pct = math.floor((v[name] + booster) * mag)
+            local lbl = self.sv_labels[name]
+            if not mag then
+                lbl:SetText("?")
             else
-                pct = math.floor(v[name] * mag)
-                local booster = actor_status.get_boost(BOOST_SENSOR[name]) or 0
-                local booster_pct = st_b[BOOSTER_STAT_KEY[name]] and math.floor(booster * st_b[BOOSTER_STAT_KEY[name]].magnitude) or 0
-                pct = clamp(pct + booster_pct, 0, 100)
+                local val = v[name] or 0
+                local pct, pct_comp
+
+                if name == "wound" or name == "fire_wound" then
+                    local booster = actor_status.get_boost(BOOST_SENSOR[name]) or 0
+                    pct = math.floor((val + booster) * mag)
+
+                    if cmp_type == "outfit" and v_comp then
+                        -- Booster unchanged by outfit swap; substitute outfit+artefact contribution.
+                        pct_comp = math.floor(((v_comp[name] or 0) + booster) * mag)
+                    elseif cmp_type == "booster" and cmp_sec then
+                        local wk    = BOOST_WOUND_LTX[name]
+                        local new_b = wk and SYS_GetParam(0, cmp_sec, wk, 0) or 0
+                        pct_comp = math.floor((val + new_b) * mag)
+                    end
+                else
+                    local booster = BOOST_SENSOR[name] and (actor_status.get_boost(BOOST_SENSOR[name]) or 0) or 0
+                    local bsk     = BOOSTER_STAT_KEY[name]
+                    local bpct    = bsk and st_b[bsk] and math.floor(booster * st_b[bsk].magnitude) or 0
+                    local pct_outfit = math.floor(val * mag)
+                    pct = clamp(pct_outfit + bpct, 0, 100)
+
+                    if cmp_type == "outfit" and v_comp then
+                        -- Booster unchanged; substitute outfit+artefact contribution.
+                        pct_comp = clamp(math.floor((v_comp[name] or 0) * mag) + bpct, 0, 100)
+                    elseif cmp_type == "booster" and bsk and st_b[bsk] and cmp_sec then
+                        local new_val  = utils_ui.get_stats_value(cmp_obj, cmp_sec, st_b[bsk], bsk) or 0
+                        local new_bpct = math.floor(new_val * st_b[bsk].magnitude)
+                        pct_comp = clamp(pct_outfit + new_bpct, 0, 100)
+                    end
+                end
+
+                if pct_comp and pct_comp ~= pct then
+                    lbl:SetText(pct .. "% -> " .. pct_comp .. "%")
+                else
+                    lbl:SetText(pct .. "%")
+                end
             end
-            self.sv_labels[name]:SetText(pct .. "%")
         end
     end
 
@@ -206,6 +285,36 @@ local function install_hook()
 end
 
 -- ──────────────────────────────────────────────────────────────────────────────
+-- utils_ui.UIInfoItem.Update hook — captures the hovered item each frame so
+-- update_sensor_labels can show comparison values on the next UpdateStats tick.
+
+local function install_info_hook()
+    if sv_info_hook_installed or not utils_ui or not utils_ui.UIInfoItem then return end
+    sv_info_hook_installed = true
+
+    local orig = utils_ui.UIInfoItem.Update
+    utils_ui.UIInfoItem.Update = function(self, obj, sec, flags)
+        if obj then
+            local slot = SYS_GetParam(2, obj:section(), "slot", -1) + 1
+            self.sv_hover_obj  = obj
+            self.sv_hover_slot = slot
+            if slot == 7 or slot == 12 then
+                self.sv_hover_type = "outfit"
+            elseif IsItem("consumable", obj:section()) then
+                self.sv_hover_type = "booster"
+            else
+                self.sv_hover_type = nil
+            end
+        else
+            self.sv_hover_obj  = nil
+            self.sv_hover_slot = nil
+            self.sv_hover_type = nil
+        end
+        orig(self, obj, sec, flags)
+    end
+end
+
+-- ──────────────────────────────────────────────────────────────────────────────
 -- DXML: patch actor_state_info XML before the engine consumes it
 
 local function patch_xml(xml_obj, is_16)
@@ -247,10 +356,12 @@ function on_xml_read()
             sv_ui_file = "actor_state_info_16.xml"
             patch_xml(xml_obj, true)
             install_hook()
+            install_info_hook()
         elseif xml_file_name == [[ui\actor_state_info.xml]] or xml_file_name == "actor_state_info.xml" then
             sv_ui_file = "actor_state_info.xml"
             patch_xml(xml_obj, false)
             install_hook()
+            install_info_hook()
         end
     end)
 end
