@@ -3,8 +3,12 @@
 -- the sensor section from ui_inventory_16.xml into those dedicated files).
 -- DXML patches each sensor element to add a <text> child, then hooks
 -- ui_inventory.UIInventory.UpdateStats to write percentage values into them.
--- Comparison: hovering an outfit, helmet, or booster shows "XX% -> YY%" colored
--- green (better) or red (worse), matching the bar comparison visual.
+-- Comparison: hovering an outfit, helmet, or booster replaces the label with the
+-- new value, colored green (better) or red (worse).
+
+local CLR_WHITE = GetARGB(255, 255, 255, 255)
+local CLR_GREEN = GetARGB(200, 100, 255, 100)
+local CLR_RED   = GetARGB(200, 255, 100, 100)
 
 local sv_ui_file             = nil
 local sv_hook_installed      = false
@@ -206,9 +210,11 @@ local function update_sensor_labels(self)
                 end
 
                 if pct_comp and pct_comp ~= pct then
-                    lbl:SetText(pct .. "% -> " .. pct_comp .. "%")
+                    lbl:SetText(pct_comp .. "%")
+                    lbl:SetTextColor(pct_comp > pct and CLR_GREEN or CLR_RED)
                 else
                     lbl:SetText(pct .. "%")
+                    lbl:SetTextColor(CLR_WHITE)
                 end
             end
         end
@@ -260,9 +266,11 @@ local function update_sensor_labels(self)
 
             local lbl = self.sv_labels[name]
             if pct_comp and pct_comp ~= pct then
-                lbl:SetText(pct .. "% -> " .. pct_comp .. "%")
+                lbl:SetText(pct_comp .. "%")
+                lbl:SetTextColor(pct_comp > pct and CLR_GREEN or CLR_RED)
             else
                 lbl:SetText(pct .. "%")
+                lbl:SetTextColor(CLR_WHITE)
             end
         end
     end
@@ -288,7 +296,7 @@ local function init_sensor_labels(self)
             local base = self.stat[name].base
             local ok_bg, bg = pcall(xml.InitStatic, xml, "equipment:actor_state_info:" .. tag .. ":static", base)
             if ok_bg and bg then
-                bg:SetWndSize(vector2():set(20, 18))
+                bg:SetWndSize(vector2():set(20, 19))
             end
             local ok, widget = pcall(xml.InitTextWnd, xml, "equipment:actor_state_info:" .. tag .. ":text", base)
             if ok and widget then
@@ -366,11 +374,11 @@ local function patch_xml(xml_obj, is_16)
             if is_not_empty(res) then
                 local el = res[1]
                 xml_obj:insertFromXMLString(string.format(
-                    [[<static x="%d" y="5" width="%d" height="18" stretch="1"><texture a="130" r="0" g="0" b="0">ui_icons_PDA_tooltips</texture></static>]],
+                    [[<static x="%d" y="5" width="%d" height="19" stretch="1"><texture a="175" r="0" g="0" b="0">ui_icons_PDA_tooltips</texture></static>]],
                     x, w
                 ), el, #el.kids)
                 xml_obj:insertFromXMLString(string.format(
-                    [[<text x="%d" y="6.5" width="%d" height="18" align="c" vert_align="c" font="letterica16" r="255" g="255" b="255" a="200"></text>]],
+                    [[<text x="%d" y="6.5" width="%d" height="19" align="c" vert_align="c" font="letterica16" r="255" g="255" b="255" a="200"></text>]],
                     x, w
                 ), el, #el.kids)
             end
