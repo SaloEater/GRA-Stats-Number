@@ -25,6 +25,42 @@ local SENSORS = {
     { "sleep",      "sleep_sensor",      21,  46, 28,  62 },
 }
 
+-- sensor key → stats_table["outfit"] key (for magnitude lookup)
+local STAT_KEY = {
+    radia      = "radiation_protection",
+    acid       = "chemical_burn_protection",
+    shock      = "shock_protection",
+    fire       = "burn_protection",
+    psi        = "telepatic_protection",
+    wound      = "wound_protection",
+    fire_wound = "fire_wound_protection",
+}
+
+-- sensor key → stats_table["artefact"] key (for get_stats_value on belt items)
+-- wound/fire_wound omitted — mirroring vanilla UpdateStats which also skips them.
+local ARTY_KEY = {
+    radia = "radiation_immunity",
+    acid  = "chemical_burn_immunity",
+    shock = "shock_immunity",
+    fire  = "burn_immunity",
+    psi   = "telepatic_immunity",
+}
+
+-- BoosterID value → sensor name for additive protection boosters
+local BOOST_SENSOR = {
+    radia = "RadiationProtection",
+    psi   = "TelepaticProtection",
+    acid  = "ChemicalBurnProtection",
+    wound = "WoundImmunity",
+    fire_wound = "FireWoundImmunity",
+}
+
+local BOOSTER_STAT_KEY = {
+    radia = "boost_radiation_protection",
+    psi   = "boost_telepat_protection",
+    acid  = "boost_chemburn_protection"
+}
+
 -- ──────────────────────────────────────────────────────────────────────────────
 -- Value update
 
@@ -32,61 +68,86 @@ local function update_sensor_labels(self)
     if not self.sv_labels then return end
     local actor = db.actor
     if not actor then return end
-    local sl = self.stat_list
 
+    -- Health
     if self.sv_labels["health"] then
         self.sv_labels["health"]:SetText(math.floor(actor.health * 100) .. "%")
     end
 
-    local prot = { "radia", "acid", "shock", "fire", "psi" }
-    for _, name in ipairs(prot) do
-        if self.sv_labels[name] then
-            local v = (self.stat_outfit[name] or 0)
-                    + (self.stat_helm[name]   or 0)
-                    + (self.stat_arty[name]   or 0)
-                    + (self.stat_boost[name]  or 0)
-            local mx  = sl[name] and sl[name].max or 1
-            local pct = (mx > 0) and math.floor(clamp(v, 0, mx) / mx * 100) or 0
-            self.sv_labels[name]:SetText(pct .. "%")
-        end
-    end
+    utils_ui.prepare_stats_table()
+    local st_o = utils_ui.stats_table["outfit"]
+    local st_a = utils_ui.stats_table["artefact"]
+    local st_b = utils_ui.stats_table["booster"]
 
-    -- wound / fire_wound: zz_ui_inventory_better_stats_bars adjusts the bar
-    -- denominator by the active booster immunity (WoundImmunity / FireWoundImmunity).
-    -- Booster values land in self.booster_immunities (not stat_boost), and the
-    -- effective max = stat_list.max * ((base_immunity - booster_imm) / base_immunity).
-    -- We replicate that formula when the UI rework extensions are present; otherwise
-    -- fall back to the vanilla sum (no booster contribution).
-    for _, name in ipairs({ "wound", "fire_wound" }) do
-        if self.sv_labels[name] then
-            local v  = (self.stat_outfit[name] or 0)
-                     + (self.stat_helm[name]   or 0)
-                     + (self.stat_arty[name]   or 0)
-            local mx = sl[name] and sl[name].max or 1
-            if self.booster_immunities and self.GetActorImmunity then
-                local imm    = self:GetActorImmunity(name) or 1
-                local b_imm  = self.booster_immunities[name] or 0
-                local ratio  = (imm > 0) and ((imm - b_imm) / imm) or 1
-                mx = mx * (ratio > 0 and ratio or 1)
+    -- Accumulate raw protection values from all sources
+    local v = {}
+
+    -- Outfit (slot 7) and Helmet (slot 12)
+    for _, slot in ipairs({ 7, 12 }) do
+        local item = actor:item_in_slot(slot)
+        if item then
+            local sec = item:section()
+            for sn, sk in pairs(STAT_KEY) do
+                local gr = st_o[sk]
+                if gr then
+                    if not v[sn] then v[sn] = 0 end
+                    v[sn] = v[sn] + (utils_ui.get_stats_value(item, sec, gr, sk) or 0)
+                end
             end
-            local pct = (mx > 0) and math.floor(clamp(v, 0, mx) / mx * 100) or 0
+        end
+    end
+
+    -- Artefacts on belt — get_stats_value is correct here (config read + condition)
+    actor:iterate_belt(function(_, obj)
+        local sec = obj:section()
+        for sn, ak in pairs(ARTY_KEY) do
+            local gr = st_a[ak]
+            if gr then
+                v[sn] = v[sn] + (utils_ui.get_stats_value(obj, sec, gr, ak) or 0)
+            end
+        end
+    end)
+
+    -- Active boosters: additive protection
+    actor:cast_Actor():conditions():BoosterForEach(function(bt, _, bval)
+        local sn = BOOST_SENSOR[bt]
+        if sn then
+            v[sn] = v[sn] + bval
+        end
+    end)
+
+    -- Display: standard protection sensors (radia/acid/shock/fire/psi)
+    for _, name in ipairs({ "radia", "acid", "shock", "fire", "psi", "wound", "fire_wound" }) do
+        if self.sv_labels[name] then
+            local gr  = st_o[STAT_KEY[name]]
+            local mag = gr and gr.magnitude
+            local pct
+            if name == "wound" or name == "fire_wound" then
+                local booster = actor_status.get_boost(BOOST_SENSOR[name]) or 0
+                pct = math.floor((v[name] + booster) * mag)
+            else
+                pct = math.floor(v[name] * mag)
+                local booster = actor_status.get_boost(BOOST_SENSOR[name]) or 0
+                local booster_pct = st_b[BOOSTER_STAT_KEY[name]] and math.floor(booster * st_b[BOOSTER_STAT_KEY[name]].magnitude) or 0
+                pct = clamp(pct + booster_pct, 0, 100)
+            end
             self.sv_labels[name]:SetText(pct .. "%")
         end
     end
 
-    -- Power: V_SatietyPower is a local inside orig UpdateStats; approximate from
-    -- the persistent component tables that UpdateStats leaves on self.
+    -- Power: formula uses V_SatietyPower() and per-outfit power_loss; read from
+    -- UpdateStats' already-computed tables since orig(self) ran before this function.
     if self.sv_labels["power"] then
-        local pw = (self.stat_outfit["power"] or 0)
-                 + (self.stat_arty["power"]   or 0)
-                 + (self.stat_boost["power"]  or 0)
+        local sl  = self.stat_list
+        local pw  = (self.stat_outfit["power"] or 0)
+                  + (self.stat_arty["power"]   or 0)
+                  + (self.stat_boost["power"]  or 0)
         local mx  = sl["power"] and sl["power"].max or 1
         local pct = (mx > 0) and math.floor(clamp(pw, 0, mx) / mx * 100) or 0
         self.sv_labels["power"]:SetText(pct .. "%")
     end
 
-    -- HTS sensors: if the HTS mod populates self.stat for these, show their bar value.
-    -- We have no generic formula so we rely on their progress bar position via self.stat.
+    -- HTS sensors: rely on their bar position (no generic formula available)
     for _, name in ipairs({ "hunger", "thirst", "sleep" }) do
         if self.sv_labels[name] and self.stat and self.stat[name] and self.stat[name].bar then
             local pos = self.stat[name].bar:GetProgressPos()
@@ -105,15 +166,19 @@ local function init_sensor_labels(self)
     -- (engine) and un-prefixed (Lua) forms so patches apply on this re-parse too.
     xml:ParseFile(sv_ui_file)
 
+    local is_16 = (sv_ui_file == "actor_state_info_16.xml")
+
     self.sv_labels = {}
     for _, s in ipairs(SENSORS) do
         local name = s[1]
         local tag  = s[2]
         if self.stat and self.stat[name] and self.stat[name].base then
-            local path = "equipment:actor_state_info:" .. tag .. ":text"
-            -- pcall guards Lua-level errors; engine-level VERIFY failures are fatal
-            -- regardless. Correct DXML patching is the real protection.
-            local ok, widget = pcall(xml.InitTextWnd, xml, path, self.stat[name].base)
+            local base = self.stat[name].base
+            local ok_bg, bg = pcall(xml.InitStatic, xml, "equipment:actor_state_info:" .. tag .. ":static", base)
+            if ok_bg and bg then
+                bg:SetWndSize(vector2():set(20, 18))
+            end
+            local ok, widget = pcall(xml.InitTextWnd, xml, "equipment:actor_state_info:" .. tag .. ":text", base)
             if ok and widget then
                 self.sv_labels[name] = widget
             end
@@ -144,6 +209,7 @@ end
 -- DXML: patch actor_state_info XML before the engine consumes it
 
 local function patch_xml(xml_obj, is_16)
+    printf("ModXML Sensor Labels: patching %s (is_16=%s)", sv_ui_file, tostring(is_16))
     for _, s in ipairs(SENSORS) do
         local tag = s[2]
         local x   = is_16 and s[3] or s[5]
@@ -156,12 +222,15 @@ local function patch_xml(xml_obj, is_16)
         else
             local res = xml_obj:query(sel)
             if is_not_empty(res) then
-                local el      = res[1]
-                local xml_str = string.format(
-                    [[<text x="%d" y="6" width="%d" height="18" align="c" vert_align="c" font="letterica16" r="255" g="255" b="255" a="200"></text>]],
+                local el = res[1]
+                xml_obj:insertFromXMLString(string.format(
+                    [[<static x="%d" y="5" width="%d" height="18" stretch="1"><texture a="130" r="0" g="0" b="0">ui_icons_PDA_tooltips</texture></static>]],
                     x, w
-                )
-                xml_obj:insertFromXMLString(xml_str, el, #el.kids)
+                ), el, #el.kids)
+                xml_obj:insertFromXMLString(string.format(
+                    [[<text x="%d" y="6.5" width="%d" height="18" align="c" vert_align="c" font="letterica16" r="255" g="255" b="255" a="200"></text>]],
+                    x, w
+                ), el, #el.kids)
             end
         end
     end
