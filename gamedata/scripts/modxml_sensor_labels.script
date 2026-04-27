@@ -226,11 +226,44 @@ local function update_sensor_labels(self)
         self.sv_labels["power"]:SetText(pct .. "%")
     end
 
-    -- HTS sensors: rely on their bar position (no generic formula available)
+    -- HTS sensors — delta scaled via GRA Bolt multipliers (eat_satiety×100,
+    -- eat_thirstiness×20, eat_sleepiness×10); positive thirst/sleep values
+    -- mean bar decreases (more thirsty/sleepy), negative values raise the bar.
     for _, name in ipairs({ "hunger", "thirst", "sleep" }) do
         if self.sv_labels[name] and self.stat and self.stat[name] and self.stat[name].bar then
             local pos = self.stat[name].bar:GetProgressPos()
-            self.sv_labels[name]:SetText(math.floor((pos or 0) * 100) .. "%")
+            local pct = math.floor((pos or 0) * 100)
+            local pct_comp
+
+            if cmp_type == "booster" and cmp_sec then
+                local raw, mult, invert
+                if name == "hunger" then
+                    raw    = SYS_GetParam(2, cmp_sec, "eat_satiety",    0)
+                    mult   = 100
+                    invert = false   -- positive = more full = bar up
+                elseif name == "thirst" then
+                    raw    = SYS_GetParam(2, cmp_sec, "eat_thirstiness", 0)
+                    mult   = 20
+                    invert = true    -- positive = more thirsty = bar down
+                elseif name == "sleep" then
+                    raw    = SYS_GetParam(2, cmp_sec, "eat_sleepiness",  0)
+                    mult   = 10
+                    invert = true    -- positive = more sleepy = bar down
+                end
+                if raw and raw ~= 0 then
+                    local num   = math.floor(math.abs(raw) * mult + 0.5)
+                    local delta = (raw > 0) and num or -num
+                    if invert then delta = -delta end
+                    pct_comp = clamp(pct + delta, 0, 100)
+                end
+            end
+
+            local lbl = self.sv_labels[name]
+            if pct_comp and pct_comp ~= pct then
+                lbl:SetText(pct .. "% -> " .. pct_comp .. "%")
+            else
+                lbl:SetText(pct .. "%")
+            end
         end
     end
 end
