@@ -347,9 +347,14 @@ local function install_info_hook()
                 self.sv_hover_type = nil
             end
         else
-            self.sv_hover_obj  = nil
-            self.sv_hover_slot = nil
-            self.sv_hover_type = nil
+            if self.sv_hover_obj then
+                -- Hover cleared: immediately refresh labels without waiting for
+                -- the next UpdateStats tick (which may be infrequent).
+                self.sv_hover_obj  = nil
+                self.sv_hover_slot = nil
+                self.sv_hover_type = nil
+                update_sensor_labels(self.owner)
+            end
         end
         orig(self, obj, sec, flags)
     end
