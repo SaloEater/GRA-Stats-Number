@@ -297,13 +297,15 @@ local function update_sensor_labels(self)
         end
     end
 
-    -- Power restore rate: total artefact contribution as % of max_power_restore_speed.
-    -- Includes active PowerRestore booster. Comparison turns green/red when hovering
-    -- a belt artefact that has power_restore_speed.
+    -- Power restore rate as % of max_power_restore_speed, rebased so 0% = net-zero
+    -- stamina while standing (stand_power is the standing baseline regen).
+    -- Positive = net regen; negative = net drain. Caveat: only accurate while standing;
+    -- walk/sprint drain shifts the real breakeven during movement.
     if self.sv_labels["power"] then
         local max_restore = SYS_GetParam(2, "actor_condition", "max_power_restore_speed") or 0.020
+        local base_regen  = math.abs(SYS_GetParam(2, "actor_condition", "stand_power") or 0.005)
         local boost_val   = actor_status.get_boost("PowerRestore") or 0
-        local total       = v_power_art + boost_val
+        local total       = base_regen + v_power_art + boost_val
         local pct         = (max_restore > 0) and (total / max_restore * 100) or 0
         local pct_comp
 
@@ -317,16 +319,16 @@ local function update_sensor_labels(self)
         elseif cmp_type == "booster" and cmp_sec then
             local new_b = SYS_GetParam(2, cmp_sec, "boost_power_restore", 0)
             if new_b ~= 0 then
-                pct_comp = (v_power_art + new_b) / max_restore * 100
+                pct_comp = (base_regen + v_power_art + new_b) / max_restore * 100
             end
         end
 
         local lbl = self.sv_labels["power"]
         if pct_comp and math.abs(pct_comp - pct) > 0.05 then
-            lbl:SetText(string.format("%+.1f%%", pct_comp))
+            lbl:SetText(string.format("%.1f%%", pct_comp))
             lbl:SetTextColor(pct_comp > pct and CLR_GREEN or CLR_RED)
         else
-            lbl:SetText(string.format("%+.1f%%", pct))
+            lbl:SetText(string.format("%.1f%%", pct))
             lbl:SetTextColor(CLR_WHITE)
         end
     end
