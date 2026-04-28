@@ -44,13 +44,14 @@ local STAT_KEY = {
 }
 
 -- sensor key → stats_table["artefact"] key (for get_stats_value on belt items)
--- wound/fire_wound omitted — mirroring vanilla UpdateStats which also skips them.
 local ARTY_KEY = {
     radia = "radiation_immunity",
     acid  = "chemical_burn_immunity",
     shock = "shock_immunity",
     fire  = "burn_immunity",
     psi   = "telepatic_immunity",
+    wound   = "wound_immunity",
+    fire_wound   = "fire_wound_immunity",
 }
 
 -- sensor key → boost ID string for actor_status.get_boost
@@ -85,7 +86,7 @@ local function update_sensor_labels(self)
 
     -- Health
     if self.sv_labels["health"] then
-        self.sv_labels["health"]:SetText(math.floor(actor.health * 100) .. "%")
+        self.sv_labels["health"]:SetText(math.ceil(actor.health * 100) .. "%")
     end
 
     utils_ui.prepare_stats_table()
@@ -93,9 +94,10 @@ local function update_sensor_labels(self)
     local st_a = utils_ui.stats_table["artefact"]
     local st_b = utils_ui.stats_table["booster"]
 
-    -- Accumulate raw protection values from outfit+artefact sources.
-    -- Boosters are handled per-sensor below via actor_status.get_boost.
-    local v = {}
+    -- v[]     = outfit+helmet only (comparison base; swapped during outfit compare)
+    -- v_art[] = belt artefact contribution (own magnitude; unaffected by outfit swaps)
+    local v     = {}
+    local v_art = {}
 
     -- Outfit (slot 7) and Helmet (slot 12)
     for _, slot in ipairs({ 7, 12 }) do
@@ -111,13 +113,13 @@ local function update_sensor_labels(self)
         end
     end
 
-    -- Artefacts on belt — get_stats_value is correct here (config read + condition)
+    -- Artefacts on belt — separate accumulator; uses st_a magnitude at display time
     actor:iterate_belt(function(_, obj)
         local sec = obj:section()
         for sn, ak in pairs(ARTY_KEY) do
             local gr = st_a[ak]
             if gr then
-                v[sn] = (v[sn] or 0) + (utils_ui.get_stats_value(obj, sec, gr, ak) or 0)
+                v_art[sn] = (v_art[sn] or 0) + (utils_ui.get_stats_value(obj, sec, gr, ak) or 0)
             end
         end
     end)
@@ -131,10 +133,11 @@ local function update_sensor_labels(self)
     end)
 
     -- ── Comparison context ────────────────────────────────────────────────────
-    local cmp_type = nil   -- "outfit" | "booster" | nil
-    local v_comp   = nil   -- adjusted v[] for outfit/helmet swap
-    local cmp_obj  = nil   -- hovered item object (for booster comparison)
-    local cmp_sec  = nil
+    local cmp_type   = nil   -- "outfit" | "booster" | "artefact" | nil
+    local v_comp     = nil   -- adjusted v[] for outfit/helmet swap
+    local v_art_comp = nil   -- v_art + hovered artefact contribution
+    local cmp_obj    = nil   -- hovered item object
+    local cmp_sec    = nil
 
     local ii = self.item_info
     if ii and ii.sv_hover_obj and ii.sv_hover_type then
@@ -143,7 +146,6 @@ local function update_sensor_labels(self)
         cmp_sec  = cmp_obj:section()
 
         if cmp_type == "outfit" then
-            -- Clone v[], subtract current equipped item in the slot, add hovered item.
             v_comp = {}
             for sn in pairs(STAT_KEY) do
                 v_comp[sn] = v[sn] or 0
@@ -158,11 +160,28 @@ local function update_sensor_labels(self)
                     end
                 end
             end
-            for sn, sk in pairs(STAT_KEY) do
-                local gr = st_o[sk]
-                if gr then
-                    v_comp[sn] = v_comp[sn] + (utils_ui.get_stats_value(cmp_obj, cmp_sec, gr, sk) or 0)
+            -- If hovering the already-equipped item, show stats without it (removal).
+            -- Otherwise show stats with the hovered item swapped in (normal comparison).
+            local removing = cur and cur:id() == cmp_obj:id()
+            if not removing then
+                for sn, sk in pairs(STAT_KEY) do
+                    local gr = st_o[sk]
+                    if gr then
+                        v_comp[sn] = v_comp[sn] + (utils_ui.get_stats_value(cmp_obj, cmp_sec, gr, sk) or 0)
+                    end
                 end
+            end
+        elseif cmp_type == "artefact" then
+            local on_belt = false
+            actor:iterate_belt(function(_, obj)
+                if obj:id() == cmp_obj:id() then on_belt = true end
+            end)
+            v_art_comp = {}
+            for sn, ak in pairs(ARTY_KEY) do
+                local gr  = st_a[ak]
+                local val = gr and (utils_ui.get_stats_value(cmp_obj, cmp_sec, gr, ak) or 0) or 0
+                -- on_belt: subtract this artefact (removal); otherwise add it (equip).
+                v_art_comp[sn] = math.max(0, (v_art[sn] or 0) + (on_belt and -val or val))
             end
         end
         -- booster comparison is computed inline per-sensor below
@@ -181,31 +200,43 @@ local function update_sensor_labels(self)
                 local pct, pct_comp
 
                 if name == "wound" or name == "fire_wound" then
-                    local booster = actor_status.get_boost(BOOST_SENSOR[name]) or 0
-                    pct = math.floor((val + booster) * mag)
+                    local gr_a     = ARTY_KEY[name] and st_a[ARTY_KEY[name]]
+                    local arty_pct = gr_a and math.ceil((v_art[name] or 0) * gr_a.magnitude) or 0
+                    local booster  = actor_status.get_boost(BOOST_SENSOR[name]) or 0
+                    pct = math.ceil((val + booster) * mag) + arty_pct
 
                     if cmp_type == "outfit" and v_comp then
-                        -- Booster unchanged by outfit swap; substitute outfit+artefact contribution.
-                        pct_comp = math.floor(((v_comp[name] or 0) + booster) * mag)
+                        pct_comp = math.ceil(((v_comp[name] or 0) + booster) * mag) + arty_pct
                     elseif cmp_type == "booster" and cmp_sec then
                         local wk    = BOOST_WOUND_LTX[name]
                         local new_b = wk and SYS_GetParam(0, cmp_sec, wk, 0) or 0
-                        pct_comp = math.floor((val + new_b) * mag)
+                        if new_b ~= 0 then
+                            pct_comp = math.ceil((val + new_b) * mag) + arty_pct
+                        end
+                    elseif cmp_type == "artefact" and v_art_comp then
+                        local arty_pct_comp = gr_a and math.ceil((v_art_comp[name] or 0) * gr_a.magnitude) or 0
+                        pct_comp = math.ceil((val + booster) * mag) + arty_pct_comp
                     end
                 else
-                    local booster = BOOST_SENSOR[name] and (actor_status.get_boost(BOOST_SENSOR[name]) or 0) or 0
-                    local bsk     = BOOSTER_STAT_KEY[name]
-                    local bpct    = bsk and st_b[bsk] and math.floor(booster * st_b[bsk].magnitude) or 0
-                    local pct_outfit = math.floor(val * mag)
-                    pct = clamp(pct_outfit + bpct, 0, 100)
+                    local booster    = BOOST_SENSOR[name] and (actor_status.get_boost(BOOST_SENSOR[name]) or 0) or 0
+                    local bsk        = BOOSTER_STAT_KEY[name]
+                    local bpct       = bsk and st_b[bsk] and math.ceil(booster * st_b[bsk].magnitude) or 0
+                    local gr_a       = ARTY_KEY[name] and st_a[ARTY_KEY[name]]
+                    local arty_pct   = gr_a and math.ceil((v_art[name] or 0) * gr_a.magnitude) or 0
+                    local pct_outfit = math.ceil(val * mag)
+                    pct = pct_outfit + arty_pct + bpct
 
                     if cmp_type == "outfit" and v_comp then
-                        -- Booster unchanged; substitute outfit+artefact contribution.
-                        pct_comp = clamp(math.floor((v_comp[name] or 0) * mag) + bpct, 0, 100)
+                        pct_comp = math.ceil((v_comp[name] or 0) * mag) + arty_pct + bpct
                     elseif cmp_type == "booster" and bsk and st_b[bsk] and cmp_sec then
                         local new_val  = utils_ui.get_stats_value(cmp_obj, cmp_sec, st_b[bsk], bsk) or 0
-                        local new_bpct = math.floor(new_val * st_b[bsk].magnitude)
-                        pct_comp = clamp(pct_outfit + new_bpct, 0, 100)
+                        if new_val ~= 0 then
+                            local new_bpct = math.ceil(new_val * st_b[bsk].magnitude)
+                            pct_comp = pct_outfit + arty_pct + new_bpct
+                        end
+                    elseif cmp_type == "artefact" and v_art_comp then
+                        local arty_pct_comp = gr_a and math.ceil((v_art_comp[name] or 0) * gr_a.magnitude) or 0
+                        pct_comp = pct_outfit + arty_pct_comp + bpct
                     end
                 end
 
@@ -228,7 +259,7 @@ local function update_sensor_labels(self)
                   + (self.stat_arty["power"]   or 0)
                   + (self.stat_boost["power"]  or 0)
         local mx  = sl["power"] and sl["power"].max or 1
-        local pct = (mx > 0) and math.floor(clamp(pw, 0, mx) / mx * 100) or 0
+        local pct = (mx > 0) and math.ceil(clamp(pw, 0, mx) / mx * 100) or 0
         self.sv_labels["power"]:SetText(pct .. "%")
     end
 
@@ -238,7 +269,7 @@ local function update_sensor_labels(self)
     for _, name in ipairs({ "hunger", "thirst", "sleep" }) do
         if self.sv_labels[name] and self.stat and self.stat[name] and self.stat[name].bar then
             local pos = self.stat[name].bar:GetProgressPos()
-            local pct = math.floor((pos or 0) * 100)
+            local pct = math.ceil((pos or 0) * 100)
             local pct_comp
 
             if cmp_type == "booster" and cmp_sec then
@@ -257,10 +288,10 @@ local function update_sensor_labels(self)
                     invert = true    -- positive = more sleepy = bar down
                 end
                 if raw and raw ~= 0 then
-                    local num   = math.floor(math.abs(raw) * mult + 0.5)
+                    local num   = math.ceil(math.abs(raw) * mult + 0.5)
                     local delta = (raw > 0) and num or -num
                     if invert then delta = -delta end
-                    pct_comp = clamp(pct + delta, 0, 100)
+                    pct_comp = pct + delta
                 end
             end
 
@@ -343,6 +374,8 @@ local function install_info_hook()
                 self.sv_hover_type = "outfit"
             elseif IsItem("consumable", obj:section()) then
                 self.sv_hover_type = "booster"
+            elseif IsItem("artefact", obj:section()) then
+                self.sv_hover_type = "artefact"
             else
                 self.sv_hover_type = nil
             end
