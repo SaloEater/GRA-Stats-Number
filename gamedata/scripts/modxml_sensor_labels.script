@@ -25,7 +25,6 @@ local SENSORS = {
     { "psi",        "psi_sensor",        21,  91, 28, 122 },
     { "wound",      "wound_sensor",      21,  91, 28, 122 },
     { "fire_wound", "fire_wound_sensor", 21,  91, 28, 122 },
-    { "power",      "power_sensor",      21,  91, 28, 122 },
     -- HTS sensors (UI rework mod); silently skipped if not in self.stat
     { "hunger",     "hunger_sensor",     21,  46, 28,  62 },
     { "thirst",     "thirst_sensor",     21,  46, 28,  62 },
@@ -86,7 +85,7 @@ local function update_sensor_labels(self)
 
     -- Health
     if self.sv_labels["health"] then
-        self.sv_labels["health"]:SetText(math.ceil(actor.health * 100) .. "%")
+        self.sv_labels["health"]:SetText(math.floor(actor.health * 100) .. "%")
     end
 
     utils_ui.prepare_stats_table()
@@ -181,7 +180,7 @@ local function update_sensor_labels(self)
                 local gr  = st_a[ak]
                 local val = gr and (utils_ui.get_stats_value(cmp_obj, cmp_sec, gr, ak) or 0) or 0
                 -- on_belt: subtract this artefact (removal); otherwise add it (equip).
-                v_art_comp[sn] = math.max(0, (v_art[sn] or 0) + (on_belt and -val or val))
+                v_art_comp[sn] = on_belt and -val or val
             end
         end
         -- booster comparison is computed inline per-sensor below
@@ -201,66 +200,54 @@ local function update_sensor_labels(self)
 
                 if name == "wound" or name == "fire_wound" then
                     local gr_a     = ARTY_KEY[name] and st_a[ARTY_KEY[name]]
-                    local arty_pct = gr_a and math.ceil((v_art[name] or 0) * gr_a.magnitude) or 0
+                    local arty_pct = gr_a and (v_art[name] or 0) * gr_a.magnitude or 0
                     local booster  = actor_status.get_boost(BOOST_SENSOR[name]) or 0
-                    pct = math.ceil((val + booster) * mag) + arty_pct
+                    pct = (val + booster) * mag + arty_pct
 
                     if cmp_type == "outfit" and v_comp then
-                        pct_comp = math.ceil(((v_comp[name] or 0) + booster) * mag) + arty_pct
+                        pct_comp = ((v_comp[name] or 0) + booster) * mag + arty_pct
                     elseif cmp_type == "booster" and cmp_sec then
                         local wk    = BOOST_WOUND_LTX[name]
                         local new_b = wk and SYS_GetParam(0, cmp_sec, wk, 0) or 0
                         if new_b ~= 0 then
-                            pct_comp = math.ceil((val + new_b) * mag) + arty_pct
+                            pct_comp = ((val + new_b) * mag) + arty_pct
                         end
-                    elseif cmp_type == "artefact" and v_art_comp then
-                        local arty_pct_comp = gr_a and math.ceil((v_art_comp[name] or 0) * gr_a.magnitude) or 0
-                        pct_comp = math.ceil((val + booster) * mag) + arty_pct_comp
+                    elseif cmp_type == "artefact" and v_art_comp and v_art_comp[name] ~= 0 then
+                        local arty_pct_comp = gr_a and (v_art_comp[name] or 0) * gr_a.magnitude or 0
+                        pct_comp = pct + arty_pct_comp
                     end
                 else
                     local booster    = BOOST_SENSOR[name] and (actor_status.get_boost(BOOST_SENSOR[name]) or 0) or 0
                     local bsk        = BOOSTER_STAT_KEY[name]
-                    local bpct       = bsk and st_b[bsk] and math.ceil(booster * st_b[bsk].magnitude) or 0
+                    local bpct       = bsk and st_b[bsk] and booster * st_b[bsk].magnitude or 0
                     local gr_a       = ARTY_KEY[name] and st_a[ARTY_KEY[name]]
-                    local arty_pct   = gr_a and math.ceil((v_art[name] or 0) * gr_a.magnitude) or 0
-                    local pct_outfit = math.ceil(val * mag)
+                    local arty_pct   = gr_a and (v_art[name] or 0) * gr_a.magnitude or 0
+                    local pct_outfit = val * mag
                     pct = pct_outfit + arty_pct + bpct
 
                     if cmp_type == "outfit" and v_comp then
-                        pct_comp = math.ceil((v_comp[name] or 0) * mag) + arty_pct + bpct
+                        pct_comp = (v_comp[name] or 0) * mag + arty_pct + bpct
                     elseif cmp_type == "booster" and bsk and st_b[bsk] and cmp_sec then
                         local new_val  = utils_ui.get_stats_value(cmp_obj, cmp_sec, st_b[bsk], bsk) or 0
                         if new_val ~= 0 then
-                            local new_bpct = math.ceil(new_val * st_b[bsk].magnitude)
+                            local new_bpct = new_val * st_b[bsk].magnitude
                             pct_comp = pct_outfit + arty_pct + new_bpct
                         end
-                    elseif cmp_type == "artefact" and v_art_comp then
-                        local arty_pct_comp = gr_a and math.ceil((v_art_comp[name] or 0) * gr_a.magnitude) or 0
-                        pct_comp = pct_outfit + arty_pct_comp + bpct
+                    elseif cmp_type == "artefact" and v_art_comp and v_art_comp[name] ~= 0 then
+                        local arty_pct_comp = gr_a and (v_art_comp[name] or 0) * gr_a.magnitude or 0
+                        pct_comp = pct + arty_pct_comp
                     end
                 end
 
                 if pct_comp and pct_comp ~= pct then
-                    lbl:SetText(pct_comp .. "%")
+                    lbl:SetText(math.ceil(pct_comp) .. "%")
                     lbl:SetTextColor(pct_comp > pct and CLR_GREEN or CLR_RED)
                 else
-                    lbl:SetText(pct .. "%")
+                    lbl:SetText(math.ceil(pct) .. "%")
                     lbl:SetTextColor(CLR_WHITE)
                 end
             end
         end
-    end
-
-    -- Power: formula uses V_SatietyPower() and per-outfit power_loss; read from
-    -- UpdateStats' already-computed tables since orig(self) ran before this function.
-    if self.sv_labels["power"] then
-        local sl  = self.stat_list
-        local pw  = (self.stat_outfit["power"] or 0)
-                  + (self.stat_arty["power"]   or 0)
-                  + (self.stat_boost["power"]  or 0)
-        local mx  = sl["power"] and sl["power"].max or 1
-        local pct = (mx > 0) and math.ceil(clamp(pw, 0, mx) / mx * 100) or 0
-        self.sv_labels["power"]:SetText(pct .. "%")
     end
 
     -- HTS sensors — delta scaled via GRA Bolt multipliers (eat_satiety×100,
@@ -269,7 +256,7 @@ local function update_sensor_labels(self)
     for _, name in ipairs({ "hunger", "thirst", "sleep" }) do
         if self.sv_labels[name] and self.stat and self.stat[name] and self.stat[name].bar then
             local pos = self.stat[name].bar:GetProgressPos()
-            local pct = math.ceil((pos or 0) * 100)
+            local pct = (pos or 0) * 100
             local pct_comp
 
             if cmp_type == "booster" and cmp_sec then
@@ -288,7 +275,7 @@ local function update_sensor_labels(self)
                     invert = true    -- positive = more sleepy = bar down
                 end
                 if raw and raw ~= 0 then
-                    local num   = math.ceil(math.abs(raw) * mult + 0.5)
+                    local num   = math.abs(raw) * mult + 0.5
                     local delta = (raw > 0) and num or -num
                     if invert then delta = -delta end
                     pct_comp = pct + delta
@@ -297,10 +284,10 @@ local function update_sensor_labels(self)
 
             local lbl = self.sv_labels[name]
             if pct_comp and pct_comp ~= pct then
-                lbl:SetText(pct_comp .. "%")
+                lbl:SetText(math.floor(pct_comp) .. "%")
                 lbl:SetTextColor(pct_comp > pct and CLR_GREEN or CLR_RED)
             else
-                lbl:SetText(pct .. "%")
+                lbl:SetText(math.floor(pct) .. "%")
                 lbl:SetTextColor(CLR_WHITE)
             end
         end
