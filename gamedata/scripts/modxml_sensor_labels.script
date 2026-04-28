@@ -29,6 +29,7 @@ local SENSORS = {
     { "hunger",     "hunger_sensor",     21,  46, 28,  62 },
     { "thirst",     "thirst_sensor",     21,  46, 28,  62 },
     { "sleep",      "sleep_sensor",      21,  46, 28,  62 },
+    { "power",      "power_sensor",      21,  91, 28, 122 },
 }
 
 -- sensor key → stats_table["outfit"] key (for magnitude lookup)
@@ -113,6 +114,7 @@ local function update_sensor_labels(self)
     end
 
     -- Artefacts on belt — separate accumulator; uses st_a magnitude at display time
+    local v_power_art = 0
     actor:iterate_belt(function(_, obj)
         local sec = obj:section()
         for sn, ak in pairs(ARTY_KEY) do
@@ -121,6 +123,7 @@ local function update_sensor_labels(self)
                 v_art[sn] = (v_art[sn] or 0) + (utils_ui.get_stats_value(obj, sec, gr, ak) or 0)
             end
         end
+        v_power_art = v_power_art + SYS_GetParam(2, sec, "power_restore_speed", 0) * (obj:condition() or 1)
     end)
 
     -- Active boosters: additive protection
@@ -132,11 +135,12 @@ local function update_sensor_labels(self)
     end)
 
     -- ── Comparison context ────────────────────────────────────────────────────
-    local cmp_type   = nil   -- "outfit" | "booster" | "artefact" | nil
-    local v_comp     = nil   -- adjusted v[] for outfit/helmet swap
-    local v_art_comp = nil   -- v_art + hovered artefact contribution
-    local cmp_obj    = nil   -- hovered item object
-    local cmp_sec    = nil
+    local cmp_type    = nil   -- "outfit" | "booster" | "artefact" | nil
+    local v_comp      = nil   -- adjusted v[] for outfit/helmet swap
+    local v_art_comp  = nil   -- v_art + hovered artefact contribution
+    local cmp_obj     = nil   -- hovered item object
+    local cmp_sec     = nil
+    local cmp_on_belt = false -- true when hovered artefact is already on the belt
 
     local ii = self.item_info
     if ii and ii.sv_hover_obj and ii.sv_hover_type then
@@ -171,16 +175,16 @@ local function update_sensor_labels(self)
                 end
             end
         elseif cmp_type == "artefact" then
-            local on_belt = false
+            cmp_on_belt = false
             actor:iterate_belt(function(_, obj)
-                if obj:id() == cmp_obj:id() then on_belt = true end
+                if obj:id() == cmp_obj:id() then cmp_on_belt = true end
             end)
             v_art_comp = {}
             for sn, ak in pairs(ARTY_KEY) do
                 local gr  = st_a[ak]
                 local val = gr and (utils_ui.get_stats_value(cmp_obj, cmp_sec, gr, ak) or 0) or 0
-                -- on_belt: subtract this artefact (removal); otherwise add it (equip).
-                v_art_comp[sn] = on_belt and -val or val
+                -- cmp_on_belt: subtract this artefact (removal); otherwise add it (equip).
+                v_art_comp[sn] = cmp_on_belt and -val or val
             end
         end
         -- booster comparison is computed inline per-sensor below
@@ -290,6 +294,40 @@ local function update_sensor_labels(self)
                 lbl:SetText(math.floor(pct) .. "%")
                 lbl:SetTextColor(CLR_WHITE)
             end
+        end
+    end
+
+    -- Power restore rate: total artefact contribution as % of max_power_restore_speed.
+    -- Includes active PowerRestore booster. Comparison turns green/red when hovering
+    -- a belt artefact that has power_restore_speed.
+    if self.sv_labels["power"] then
+        local max_restore = SYS_GetParam(2, "actor_condition", "max_power_restore_speed") or 0.020
+        local boost_val   = actor_status.get_boost("PowerRestore") or 0
+        local total       = v_power_art + boost_val
+        local pct         = (max_restore > 0) and (total / max_restore * 100) or 0
+        local pct_comp
+
+        if cmp_type == "artefact" and cmp_obj then
+            local raw = SYS_GetParam(2, cmp_sec, "power_restore_speed", 0)
+            if raw ~= 0 then
+                local hover_val = raw * (cmp_obj:condition() or 1)
+                local delta     = cmp_on_belt and -hover_val or hover_val
+                pct_comp = ((total + delta) / max_restore * 100)
+            end
+        elseif cmp_type == "booster" and cmp_sec then
+            local new_b = SYS_GetParam(2, cmp_sec, "boost_power_restore", 0)
+            if new_b ~= 0 then
+                pct_comp = (v_power_art + new_b) / max_restore * 100
+            end
+        end
+
+        local lbl = self.sv_labels["power"]
+        if pct_comp and math.abs(pct_comp - pct) > 0.05 then
+            lbl:SetText(string.format("%+.1f%%", pct_comp))
+            lbl:SetTextColor(pct_comp > pct and CLR_GREEN or CLR_RED)
+        else
+            lbl:SetText(string.format("%+.1f%%", pct))
+            lbl:SetTextColor(CLR_WHITE)
         end
     end
 end
